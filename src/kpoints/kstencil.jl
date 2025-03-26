@@ -558,7 +558,7 @@ function generate_kspace_stencil(
     kpoints::AbstractVector,
     ::CubicNearestKspaceStencil,
 )
-    dkx, dky, dkz = 1 ./ size(kgrid_size)
+    dkx, dky, dkz = 1 ./ kgrid_size
     T = eltype(recip_lattice)
 
     # only 6 nearest neighbors
