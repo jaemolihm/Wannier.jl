@@ -7,7 +7,7 @@ export real_lattice, reciprocal_lattice
 
 Get atom number from symbol.
 """
-function get_atom_number(symbol::AbstractString)
+function get_atom_number(symbol::Union{AbstractString,Symbol})
     return get_atom_number([symbol])[1]
 end
 
@@ -18,7 +18,7 @@ Get atom number from symbol.
 """
 function get_atom_number(symbol::AbstractVector)
     table = [e.symbol for e in elements]
-    return [findfirst(x -> x == s, table) for s in symbol]
+    return [findfirst(x -> x == string(s), table) for s in symbol]
 end
 
 function real_lattice(recip_lattice::AbstractMatrix)

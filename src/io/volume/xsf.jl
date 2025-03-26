@@ -51,12 +51,15 @@ See also [`WannierIO.write_xsf`](@ref)
 """
 function write_xsf(
     filename::AbstractString,
-    lattice::AbstractMatrix{T},
-    atom_positions::Vector{Vec3{T}},
-    atom_numbers::AbstractVector{Int},
-    rgrid::RGrid,
-    W::AbstractArray{T,3},
-) where {T<:Real}
+    lattice::AbstractMatrix,
+    atom_positions::AbstractVector{V},
+    atom_numbers::AbstractVector,
+    rgrid::Union{RGrid,Nothing}=nothing,
+    W::Union{AbstractArray{T,3},Nothing}=nothing,
+) where {V<:AbstractVector,T<:Real}
+    if isnothing(rgrid) || isnothing(W)
+        return WannierIO.write_xsf(filename, lattice, atom_positions, atom_numbers)
+    end
     O = origin(rgrid)
     spanvec = span_vectors(rgrid)
     return WannierIO.write_xsf(
