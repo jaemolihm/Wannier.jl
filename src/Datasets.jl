@@ -9,7 +9,7 @@ using LazyArtifacts
 using Artifacts
 
 # for pretty printing directory tree
-using FileTrees
+using PrintFileTree: printfiletree
 
 using ..Wannier: read_w90
 
@@ -32,7 +32,7 @@ function load_dataset(name)
 end
 
 function show_dataset(name)
-    return FileTree(Artifacts.@artifact_str(name))
+    return printfiletree(Artifacts.@artifact_str(name))
 end
 
 """
