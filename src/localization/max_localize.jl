@@ -77,8 +77,8 @@ function max_localize(
         Optim.Options(;
             show_trace=true,
             iterations=max_iter,
-            f_tol=f_tol,
-            g_tol=g_tol,
+            f_reltol=f_tol,
+            g_abstol=g_tol,
             allow_f_increases=true,
         ),
     )
