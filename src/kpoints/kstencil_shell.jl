@@ -1,6 +1,56 @@
 using NearestNeighbors: knn, KDTree
 
 """
+    sorted_multi_indices(d, n)
+
+Generate all sorted multi-indices of length `n` in `{1,...,d}`.
+
+These index the unique elements of a symmetric `n`-th order tensor in `d` dimensions.
+The number of such indices is `binomial(d + n - 1, n)`.
+
+# Examples
+```julia
+sorted_multi_indices(3, 2)  # [(1,1),(1,2),(1,3),(2,2),(2,3),(3,3)]
+```
+"""
+function sorted_multi_indices(d::Int, n::Int)
+    indices = NTuple{n,Int}[]
+    # recursive generation of sorted tuples
+    function _generate(current::Vector{Int}, start::Int)
+        if length(current) == n
+            push!(indices, NTuple{n,Int}(current))
+            return
+        end
+        for i in start:d
+            push!(current, i)
+            _generate(current, i)
+            pop!(current)
+        end
+    end
+    _generate(Int[], 1)
+    return indices
+end
+
+"""
+    symmetric_tensor_sum(bvectors_shell, n)
+
+For a shell of b-vectors, compute the unique elements of `∑_b b^⊗n`.
+
+Returns a vector of length `binomial(3 + n - 1, n)` containing the unique elements
+of the symmetric tensor `∑_b ∏_{j ∈ multi_index} b[j]`.
+"""
+function symmetric_tensor_sum(bvectors_shell::Vector{Vec3{T}}, n::Int) where {T}
+    indices = sorted_multi_indices(3, n)
+    result = zeros(T, length(indices))
+    for b in bvectors_shell
+        for (idx, mi) in enumerate(indices)
+            result[idx] += prod(b[j] for j in mi)
+        end
+    end
+    return result
+end
+
+"""
     $(TYPEDEF)
 
 Shells of b-vectors.
@@ -66,13 +116,17 @@ end
 function KspaceStencilShells(
     recip_lattice, kgrid_size, kpoints;
     atol=default_w90_kmesh_tol(),
+    order::Int=1,
 )
-    # find shells
-    shells = search_shells(recip_lattice, kgrid_size, kpoints; atol)
+    # find shells, search more shells for higher-order FD
+    shells = search_shells(
+        recip_lattice, kgrid_size, kpoints;
+        atol, max_shells=default_w90_bvectors_search_shells() * order,
+    )
     keep_shells = check_parallel(shells)
     shells = delete_shells(shells, keep_shells)
 
-    keep_shells, bweights = compute_bweights(shells; atol)
+    keep_shells, bweights = compute_bweights(shells; atol, order)
     shells = delete_shells(shells, keep_shells)
     shells.bweights .= bweights
 
@@ -81,7 +135,7 @@ function KspaceStencilShells(
         shells = delete_shells_Γ(shells)
     end
 
-    check_completeness(shells; atol)
+    check_completeness(shells; atol, order)
     return shells
 end
 
@@ -339,42 +393,55 @@ shells that satisfy the B1 condition, and return the new `KspaceStencilShells` a
     - `atol` should be set to wannier90's input parameter `kmesh_tol`
 """
 function compute_bweights(
-    bvectors::Vector{Vector{Vec3{T}}}; atol=default_w90_kmesh_tol()
+    bvectors::Vector{Vector{Vec3{T}}}; atol=default_w90_kmesh_tol(), order::Int=1
 ) where {T}
     nshells = length(bvectors)
     @assert nshells > 0 "empty bvectors"
+    @assert order >= 1 "order must be >= 1"
 
-    # only compare the upper triangular part of bvec * bvec', 6 elements
-    B = zeros(T, 6, nshells)
+    # Number of rows = sum of unique elements of symmetric tensors of even orders 2,4,...,2*order
+    # For d=3: binomial(3+2k-1, 2k) = 6, 15, 28 for k=1,2,3
+    nrows = sum(binomial(3 + 2k - 1, 2k) for k in 1:order)
 
-    # return the upper triangular part of a matrix column-by-column as a vector
-    # e.g., triu2vec(I) = [1 0 1 0 0 1]
-    triu2vec(m::AbstractMatrix) = m[triu!(trues(size(m)), 0)]
-    triu_I = triu2vec(diagm([1, 1, 1]))
+    B = zeros(T, nrows, nshells)
+
+    # Target vector: 2nd-order moment = identity (unique elements of δ_ij),
+    # higher-order moments = 0
+    target = zeros(T, nrows)
+    # Fill the 2nd-order target: unique elements of I₃ for sorted pairs
+    # (1,1) -> 1, (1,2) -> 0, (1,3) -> 0, (2,2) -> 1, (2,3) -> 0, (3,3) -> 1
+    indices_2 = sorted_multi_indices(3, 2)
+    for (idx, mi) in enumerate(indices_2)
+        target[idx] = (mi[1] == mi[2]) ? one(T) : zero(T)
+    end
 
     # weight of each shell
     W = zeros(nshells)
 
-    # sigular value tolerance, to reproduce W90 behavior
+    # singular value tolerance, to reproduce W90 behavior
     σ_atol = default_w90_bvectors_singular_value_atol()
+    σ_atol = 0.0
 
     keep_shells = zeros(Int, 0)
     ish = 1
     while ish <= nshells
         push!(keep_shells, ish)
-        # to 3 * n_degens[ish] matrix
-        b = reduce(hcat, bvectors[ish])
-        B[:, ish] = triu2vec(b * b')
-        # Solve equation B * W = triu_I
-        # size(B) = (6, n_shells), W is diagonal matrix of size n_shells
-        # B = U * S * V' -> W = V * S^-1 * U' * triu_I
+        # Build column for this shell: concatenate symmetric_tensor_sum for each even order
+        col = T[]
+        for k in 1:order
+            append!(col, symmetric_tensor_sum(bvectors[ish], 2k))
+        end
+        B[:, ish] = col
+        # Solve equation B * W = target
+        # B = U * S * V' -> W = V * S^-1 * U' * target
         U, S, V = svd(B[:, keep_shells])
         @debug "S" ish S = S' keep_shells = keep_shells'
         if all(S .> σ_atol)
-            W[keep_shells] = V * inv(Diagonal(S)) * U' * triu_I
+            W .= 0
+            W[keep_shells] .= B[:, keep_shells] \ target
             BW = B[:, keep_shells] * W[keep_shells]
             @debug "BW" ish BW = BW'
-            if isapprox(BW, triu_I; atol)
+            if isapprox(BW, target; atol)
                 break
             end
         else
@@ -383,7 +450,7 @@ function compute_bweights(
         ish += 1
     end
     if ish == nshells + 1
-        error("not enough shells to satisfy B1 condition")
+        error("not enough shells to satisfy completeness condition (order=$order)")
     end
 
     bweights = W[keep_shells]
@@ -406,8 +473,8 @@ Try to guess bvector bweights from MV1997 Eq. (B1).
     To reproduce wannier90's behavior,
     - `atol` should be set to wannier90's input parameter `kmesh_tol`
 """
-function compute_bweights(shells::KspaceStencilShells; atol=default_w90_kmesh_tol())
-    return compute_bweights(shells.bvectors; atol)
+function compute_bweights(shells::KspaceStencilShells; atol=default_w90_kmesh_tol(), order::Int=1)
+    return compute_bweights(shells.bvectors; atol, order)
 end
 
 """
@@ -427,26 +494,36 @@ Check completeness (B1 condition) of `KspaceStencilShells`.
     - `atol` should be set to wannier90's input parameter `kmesh_tol`
 """
 function check_completeness(
-    shells::KspaceStencilShells{T}; atol=default_w90_kmesh_tol()
+    shells::KspaceStencilShells{T}; atol=default_w90_kmesh_tol(), order::Int=1
 ) where {T}
-    M = zeros(T, 3, 3)
+    for k in 1:order
+        n = 2k
+        # Compute moment: M_{2k} = ∑_shells w * symmetric_tensor_sum(bvecs, 2k)
+        indices = sorted_multi_indices(3, n)
+        M = zeros(T, length(indices))
+        for (bvecs, w) in zip(shells.bvectors, shells.bweights)
+            M .+= w .* symmetric_tensor_sum(bvecs, n)
+        end
 
-    for (bvecs, w) in zip(shells.bvectors, shells.bweights)
-        bvec = reduce(hcat, bvecs)
-        M += w * bvec * bvec'
+        if k == 1
+            # 2nd moment should equal δ_ij (unique elements of identity)
+            target = T[mi[1] == mi[2] ? one(T) : zero(T) for mi in indices]
+        else
+            # Higher even moments should be zero
+            target = zeros(T, length(indices))
+        end
+
+        @debug "Bvector moment order $n" M target
+        Δ = M - target
+        if !all(isapprox.(Δ, 0; atol))
+            error("""b-vector completeness condition not satisfied for moment order $n
+                     atol = $atol
+                     Δ = $(maximum(abs.(Δ)))
+                     try increasing atol?""")
+        end
     end
 
-    @debug "Bvector sum" M
-    Δ = M - Matrix(I, 3, 3)
-    # compare element-wise, to be consistent with W90
-    if !all(isapprox.(Δ, 0; atol))
-        error("""b-vector completeness condition not satisfied
-                 atol = $atol
-                 Δ = $(maximum(abs.(Δ)))
-                 try increasing atol?""")
-    end
-
-    @info "b-vector completeness condition satisfied"
+    @info "b-vector completeness condition satisfied (order=$order)"
     return nothing
 end
 

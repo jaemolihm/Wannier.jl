@@ -27,7 +27,7 @@ default_w90_bvectors_check_parallel_atol() = 1e-6
 Wannier90's internal constant for checking the sigular value when computing
 bvector bweights. See [`compute_bweights`](@ref).
 """
-default_w90_bvectors_singular_value_atol() = 1e-5
+default_w90_bvectors_singular_value_atol() = 1e-6
 
 """
 Wannier90's internal constant for sorting bvector order.

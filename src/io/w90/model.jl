@@ -13,7 +13,7 @@ Read `win` and `mmn` files, and read `amn`/`eig` files if they exist.
 - kstencil_algo: algorithm to generate `KspaceStencil` if `use_mmn_bvecs` is `false`.
     Default is `generate_kspace_stencil`.
 """
-function read_w90(prefix::AbstractString; ortho_amn::Bool=true, use_mmn_bvecs::Bool=true, kstencil_algo::KspaceStencilAlgorithm=default_kstencil_algo())
+function read_w90(prefix::AbstractString; ortho_amn::Bool=true, use_mmn_bvecs::Bool=true, kstencil_algo::KspaceStencilAlgorithm=default_kstencil_algo(), order::Int=1)
     win = read_win(prefix * ".win")
     nbands = win.num_bands
     nwann = win.num_wann
@@ -29,11 +29,11 @@ function read_w90(prefix::AbstractString; ortho_amn::Bool=true, use_mmn_bvecs::B
     @assert (nbands, nbands) == size(overlaps[1][1]) "different n_bands in mmn and win files"
 
     if use_mmn_bvecs
-        kstencil = KspaceStencil(recip_lattice, win.kpoints, kpb_k, kpb_G)
+        kstencil = KspaceStencil(recip_lattice, win.kpoints, kpb_k, kpb_G; order)
     else
         atol = get(win, :kmesh_tol, default_w90_kmesh_tol())
         kstencil = generate_kspace_stencil(
-            recip_lattice, win.mp_grid, win.kpoints, kstencil_algo; atol
+            recip_lattice, win.mp_grid, win.kpoints, kstencil_algo; atol, order
         )
         @assert n_bvectors(kstencil) == nbvecs "different n_bvectors in mmn and win files"
         @assert kstencil.kpb_k == kpb_k "auto generated kpb_k are different from mmn file"
