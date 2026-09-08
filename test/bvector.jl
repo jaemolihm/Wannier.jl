@@ -159,3 +159,44 @@ end
     ]
     @test isapprox(weights, ref_weights; atol = 1.0e-6)
 end
+
+@testitem "generate_kspace_stencil higher order" begin
+    using LinearAlgebra
+    using Wannier.Datasets
+    win = read_win(dataset"Si2_valence/Si2_valence.win")
+    recip_lattice = Wannier.reciprocal_lattice(win["unit_cell_cart"])
+
+    # `order = 1` must not perturb wannier90's default at all
+    ref = generate_kspace_stencil(recip_lattice, win["mp_grid"], win["kpoints"])
+    s1 = generate_kspace_stencil(
+        recip_lattice, win["mp_grid"], win["kpoints"]; order = 1
+    )
+    @test s1.bweights == ref.bweights
+    @test s1.kpb_k == ref.kpb_k
+    @test s1.kpb_G == ref.kpb_G
+
+    # moments of the stencil: ∑_b w_b b^⊗n
+    function moment(stencil, n)
+        M = zeros(ntuple(_ -> 3, n))
+        for (wb, b) in zip(stencil.bweights, stencil.bvectors)
+            for idx in CartesianIndices(M)
+                M[idx] += wb * prod(b[i] for i in Tuple(idx))
+            end
+        end
+        return M
+    end
+
+    # first order satisfies the B1 condition but not the 4th moment
+    @test moment(s1, 2) ≈ I
+    @test maximum(abs, moment(s1, 4)) > 1.0e-3
+
+    # second order annihilates the 4th moment as well, which needs more shells
+    s2 = generate_kspace_stencil(
+        recip_lattice, win["mp_grid"], win["kpoints"]; order = 2
+    )
+    @test n_bvectors(s2) > n_bvectors(s1)
+    @test moment(s2, 2) ≈ I
+    @test maximum(abs, moment(s2, 4)) < 1.0e-6
+    # the outer shells carry negative weights, the signature of higher-order FD
+    @test any(<(0), s2.bweights)
+end

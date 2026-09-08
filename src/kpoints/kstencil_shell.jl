@@ -1,5 +1,46 @@
 using NearestNeighbors: knn, KDTree
 
+@doc raw"""
+    $(SIGNATURES)
+
+Monomial exponents `(nx, ny, nz)` of total degree `n`, in wannier90's ordering.
+
+Enumerates `nz` ascending in the outer loop and `ny` ascending in the inner one,
+matching `kmesh_get_amat` (wannier90 `src/kmesh.F90:1770-1788`). For `n = 2`
+this gives `(xx, xy, yy, xz, yz, zz)`, i.e. the column-major upper triangle of
+``\bm{b} \bm{b}^{T}``, which is why the second-moment target has its ones at
+positions 1, 3 and 6.
+
+There are `binomial(n + 2, 2)` of them: 6, 15, 28 for `n = 2, 4, 6`.
+"""
+function monomial_exponents(n::Integer)
+    exponents = NTuple{3, Int}[]
+    for nz in 0:n
+        for ny in 0:(n - nz)
+            push!(exponents, (n - ny - nz, ny, nz))
+        end
+    end
+    return exponents
+end
+
+@doc raw"""
+    $(SIGNATURES)
+
+Moments ``\sum_{\bm{b}} b_x^{n_x} b_y^{n_y} b_z^{n_z}`` of one shell of
+b-vectors, for every monomial of total degree `n` returned by
+[`monomial_exponents`](@ref).
+"""
+function moment_sum(bvectors_shell::Vector{Vec3{T}}, n::Integer) where {T}
+    exponents = monomial_exponents(n)
+    moments = zeros(T, length(exponents))
+    for b in bvectors_shell
+        for (i, (nx, ny, nz)) in enumerate(exponents)
+            moments[i] += b[1]^nx * b[2]^ny * b[3]^nz
+        end
+    end
+    return moments
+end
+
 """
     $(TYPEDEF)
 
@@ -66,13 +107,17 @@ end
 function KspaceStencilShells(
         recip_lattice, kgrid_size, kpoints;
         atol = default_w90_kmesh_tol(),
+        order::Int = 1,
     )
-    # find shells
-    shells = search_shells(recip_lattice, kgrid_size, kpoints; atol)
+    # higher-order FD needs more shells to satisfy the higher moment conditions
+    shells = search_shells(
+        recip_lattice, kgrid_size, kpoints;
+        atol, max_shells = default_w90_bvectors_search_shells() * order,
+    )
     keep_shells = check_parallel(shells)
     shells = delete_shells(shells, keep_shells)
 
-    keep_shells, bweights = compute_bweights(shells; atol)
+    keep_shells, bweights = compute_bweights(shells; atol, order)
     shells = delete_shells(shells, keep_shells)
     shells.bweights .= bweights
 
@@ -81,7 +126,7 @@ function KspaceStencilShells(
         shells = delete_shells_Γ(shells)
     end
 
-    check_completeness(shells; atol)
+    check_completeness(shells; atol, order)
     return shells
 end
 
@@ -340,42 +385,54 @@ shells that satisfy the B1 condition, and return the new `KspaceStencilShells` a
     - `atol` should be set to wannier90's input parameter `kmesh_tol`
 """
 function compute_bweights(
-        bvectors::Vector{Vector{Vec3{T}}}; atol = default_w90_kmesh_tol()
+        bvectors::Vector{Vector{Vec3{T}}}; atol = default_w90_kmesh_tol(), order::Int = 1
     ) where {T}
     nshells = length(bvectors)
     @assert nshells > 0 "empty bvectors"
+    @assert order >= 1 "order must be >= 1"
 
-    # only compare the upper triangular part of bvec * bvec', 6 elements
-    B = zeros(T, 6, nshells)
+    # one row block per even moment 2, 4, ..., 2*order
+    nrows = sum(binomial(2k + 2, 2) for k in 1:order)
+
+    B = zeros(T, nrows, nshells)
 
     # return the upper triangular part of a matrix column-by-column as a vector
     # e.g., triu2vec(I) = [1 0 1 0 0 1]
     triu2vec(m::AbstractMatrix) = m[triu!(trues(size(m)), 0)]
     triu_I = triu2vec(diagm([1, 1, 1]))
 
+    # the 2nd moment must equal δ_ij, every higher even moment must vanish
+    target = zeros(T, nrows)
+    target[1:length(triu_I)] = triu_I
+
     # weight of each shell
     W = zeros(nshells)
 
-    # sigular value tolerance, to reproduce W90 behavior
+    # singular value tolerance, to reproduce W90 behavior
     σ_atol = default_w90_bvectors_singular_value_atol()
 
     keep_shells = zeros(Int, 0)
     ish = 1
     while ish <= nshells
         push!(keep_shells, ish)
-        # to 3 * n_degens[ish] matrix
+        # column of this shell: the even moments 2, 4, ..., 2*order stacked.
+        # The 2nd moment keeps the `b * b'` form of the first-order code so
+        # that `order = 1` stays bit-identical to wannier90's default.
         b = reduce(hcat, bvectors[ish])
-        B[:, ish] = triu2vec(b * b')
-        # Solve equation B * W = triu_I
-        # size(B) = (6, n_shells), W is diagonal matrix of size n_shells
-        # B = U * S * V' -> W = V * S^-1 * U' * triu_I
+        col = triu2vec(b * b')
+        for k in 2:order
+            append!(col, moment_sum(bvectors[ish], 2k))
+        end
+        B[:, ish] = col
+        # Solve equation B * W = target
+        # B = U * S * V' -> W = V * S^-1 * U' * target
         U, S, V = svd(B[:, keep_shells])
         @debug "S" ish S = S' keep_shells = keep_shells'
         if all(S .> σ_atol)
-            W[keep_shells] = V * inv(Diagonal(S)) * U' * triu_I
+            W[keep_shells] = V * inv(Diagonal(S)) * U' * target
             BW = B[:, keep_shells] * W[keep_shells]
             @debug "BW" ish BW = BW'
-            if isapprox(BW, triu_I; atol)
+            if isapprox(BW, target; atol)
                 break
             end
         else
@@ -384,7 +441,7 @@ function compute_bweights(
         ish += 1
     end
     if ish == nshells + 1
-        error("not enough shells to satisfy B1 condition")
+        error("not enough shells to satisfy completeness condition (order=$order)")
     end
 
     bweights = W[keep_shells]
@@ -407,8 +464,10 @@ Try to guess bvector bweights from MV1997 Eq. (B1).
     To reproduce wannier90's behavior,
     - `atol` should be set to wannier90's input parameter `kmesh_tol`
 """
-function compute_bweights(shells::KspaceStencilShells; atol = default_w90_kmesh_tol())
-    return compute_bweights(shells.bvectors; atol)
+function compute_bweights(
+        shells::KspaceStencilShells; atol = default_w90_kmesh_tol(), order::Int = 1
+    )
+    return compute_bweights(shells.bvectors; atol, order)
 end
 
 """
@@ -428,10 +487,10 @@ Check completeness (B1 condition) of `KspaceStencilShells`.
     - `atol` should be set to wannier90's input parameter `kmesh_tol`
 """
 function check_completeness(
-        shells::KspaceStencilShells{T}; atol = default_w90_kmesh_tol()
+        shells::KspaceStencilShells{T}; atol = default_w90_kmesh_tol(), order::Int = 1
     ) where {T}
+    # 2nd moment: ∑_b w_b b ⊗ b must equal the identity
     M = zeros(T, 3, 3)
-
     for (bvecs, w) in zip(shells.bvectors, shells.bweights)
         bvec = reduce(hcat, bvecs)
         M += w * bvec * bvec'
@@ -449,7 +508,26 @@ function check_completeness(
         )
     end
 
-    @info "b-vector completeness condition satisfied"
+    # every higher even moment must vanish
+    for k in 2:order
+        n = 2k
+        moments = zeros(T, length(monomial_exponents(n)))
+        for (bvecs, w) in zip(shells.bvectors, shells.bweights)
+            moments .+= w .* moment_sum(bvecs, n)
+        end
+
+        @debug "Bvector moment" n moments
+        if !all(isapprox.(moments, 0; atol))
+            error(
+                """b-vector completeness condition not satisfied for moment order $n
+                atol = $atol
+                Δ = $(maximum(abs.(moments)))
+                try increasing atol?"""
+            )
+        end
+    end
+
+    @info "b-vector completeness condition satisfied" order
     return nothing
 end
 
