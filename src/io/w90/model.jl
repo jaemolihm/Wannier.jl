@@ -12,9 +12,13 @@ Read `win` and `mmn` files, and read `amn`/`eig` files if they exist.
 - use_mmn_bvecs: use the b-vectors in `mmn` file instead of regenerating them.
 - kstencil_algo: algorithm to generate `KspaceStencil` if `use_mmn_bvecs` is `false`.
     Default is `generate_kspace_stencil`.
-- order: order of the finite-difference formula for the b-vector weights.
-    `order = 1` is wannier90's default; `order = n` requests weights satisfying
-    the completeness conditions up to moment `2n`. See [`compute_bweights`](@ref).
+- order: order of the finite-difference formula for the b-vector weights,
+    i.e. wannier90's `higher_order_n`. `order = 1` is wannier90's default;
+    `order = n` gives weights satisfying the completeness condition on every
+    even moment up to `2n`. Must match the `higher_order_n` the `mmn` was
+    generated with: on the `use_mmn_bvecs = true` path the weights are recovered
+    from the b-vector list, which is ill-posed at the wrong order and errors.
+    See [`compute_bweights`](@ref) and [`replicate_shells`](@ref).
 """
 function read_w90(
         prefix::AbstractString;

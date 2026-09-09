@@ -116,7 +116,9 @@ function KspaceStencilShells(
         atol = default_w90_kmesh_tol(),
         order::Int = 1,
     )
-    shells = search_shells(recip_lattice, kgrid_size, kpoints; atol, order)
+    shells = search_shells(recip_lattice, kgrid_size, kpoints; atol)
+    # `check_parallel` must run before the shells are replicated: b and 2b are
+    # exactly parallel, and are precisely what a higher-order stencil needs
     keep_shells = check_parallel(shells)
     shells = delete_shells(shells, keep_shells)
 
@@ -129,8 +131,72 @@ function KspaceStencilShells(
         shells = delete_shells_Γ(shells)
     end
 
+    if order > 1
+        shells = replicate_shells(shells, order)
+    end
+
     check_completeness(shells; atol)
     return shells
+end
+
+@doc raw"""
+    $(SIGNATURES)
+
+Coefficients of the ``n``-th order central finite-difference formula, i.e.
+wannier90's `fact` in `kmesh_shell_reconstruct`.
+
+```math
+c_m = \frac{1}{m^2} \prod_{j \ne m}^{n} \frac{j^2}{j^2 - m^2}
+```
+
+Writing ``x_m = m^2``, ``c_m m^{2k} = x_m^{k-1} \prod_{j \ne m} x_j / (x_j -
+x_m)``, so summing over ``m`` is the Lagrange interpolation of ``x^{k-1}``
+evaluated at ``x = 0``. For ``k \le n`` that is exact, hence
+
+```math
+\sum_{m=1}^{n} c_m m^{2k} = \delta_{k1}, \qquad k = 1, \dots, n
+```
+
+which is exactly the completeness condition on every even moment up to ``2n``:
+scaling a shell by ``m`` scales its ``2k``-th moment by ``m^{2k}``.
+"""
+function higher_order_coefficients(order::Integer)
+    return map(1:order) do m
+        c = 1 / m^2
+        for j in 1:order
+            j == m && continue
+            c *= j^2 / (j^2 - m^2)
+        end
+        return c
+    end
+end
+
+@doc raw"""
+    $(SIGNATURES)
+
+Replicate each shell at ``\mathbf{b}, 2\mathbf{b}, \dots, n\mathbf{b}`` and
+scale its weight by [`higher_order_coefficients`](@ref), giving a stencil whose
+weights satisfy the completeness condition on every even moment up to `2n`.
+
+This is wannier90's `kmesh_shell_reconstruct` (`src/kmesh.F90`), the algorithm
+behind its default `higher_order_n`. The replicated shells are ordered with the
+multiple outermost, matching wannier90.
+"""
+function replicate_shells(shells::KspaceStencilShells{T}, order::Integer) where {T}
+    coefficients = higher_order_coefficients(order)
+
+    bvectors = Vector{Vector{Vec3{T}}}()
+    bweights = T[]
+    for (m, c) in enumerate(coefficients)
+        for (bvecs, w) in zip(shells.bvectors, shells.bweights)
+            push!(bvectors, [m * b for b in bvecs])
+            push!(bweights, w * c)
+        end
+    end
+
+    return KspaceStencilShells(
+        shells.recip_lattice, shells.kgrid_size, shells.kpoints, bvectors, bweights, order
+    )
 end
 
 function Base.show(io::IO, ::MIME"text/plain", shells::KspaceStencilShells)
@@ -175,8 +241,7 @@ function search_shells(
         kgrid_size::AbstractVector,
         kpoints::AbstractVector;
         atol = default_w90_kmesh_tol(),
-        order::Int = 1,
-        max_shells = default_w90_bvectors_search_shells() * order,
+        max_shells = default_w90_bvectors_search_shells(),
     )
     # Usually these "magic" numbers work well for normal recip_lattice.
     # Number of nearest-neighbors to be returned
@@ -230,9 +295,7 @@ function search_shells(
     @debug "Found bvector shells" bvectors
 
     bweights = zeros(T, length(shells))
-    return KspaceStencilShells(
-        recip_lattice, kgrid_size, kpoints, bvectors, bweights, order
-    )
+    return KspaceStencilShells(recip_lattice, kgrid_size, kpoints, bvectors, bweights)
 end
 
 """
