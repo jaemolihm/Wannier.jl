@@ -58,11 +58,6 @@ struct Spread{T <: Real} <: AbstractSpread
     # fix_centers :: Array{Float64,2} #3 x nwannier
 end
 
-"""Default to the Marzari-Vanderbilt functional, which is what `omega!` computes."""
-function Spread(Ω, ΩI, ΩOD, ΩD, Ω̃, ω, r)
-    return Spread(Ω, ΩI, ΩOD, ΩD, Ω̃, ω, r, :MarzariVanderbilt)
-end
-
 # TODO refactor, this is a copy-paste of `Spread` :-(
 """
     struct SpreadCenter
@@ -370,7 +365,7 @@ function omega!(cache::Cache, bvectors::KspaceStencil{FT}, M) where {FT <: Real}
     # ΩD = Ω̃ - ΩOD
     Ω = ΩI + Ω̃
 
-    return Spread(Ω, ΩI, ΩOD, ΩD, Ω̃, ω, r)
+    return Spread(Ω, ΩI, ΩOD, ΩD, Ω̃, ω, r, :MarzariVanderbilt)
     # return Spread(Ω, ΩI, ΩOD, ΩD, Ω̃, ω, r, w_froz)
 end
 

@@ -82,6 +82,25 @@ end
     @test isapprox(G, G_ref; atol = 1.0e-7)
 end
 
+@testitem "max_localize functional keyword" begin
+    using Wannier.Datasets
+    model = load_dataset("Si2_valence")
+
+    # the one-call entry point
+    Umin = max_localize(model; functional = :StengelSpaldin, max_iter = 5)
+    # same thing spelled out
+    p = StengelSpaldinPenalty(model)
+    @test Umin ≈ max_localize(p, model; max_iter = 5)
+
+    # the default is unchanged
+    @test max_localize(model; max_iter = 5) ≈
+        max_localize(SpreadPenalty(), model; max_iter = 5)
+
+    @test Wannier.spread_penalty(:MarzariVanderbilt, model) isa SpreadPenalty
+    @test Wannier.spread_penalty(:StengelSpaldin, model) isa StengelSpaldinPenalty
+    @test_throws ErrorException Wannier.spread_penalty(:nonsense, model)
+end
+
 @testitem "StengelSpaldinPenalty max_localize" begin
     using LinearAlgebra
     using Wannier.Datasets
