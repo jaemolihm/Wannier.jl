@@ -81,6 +81,11 @@ struct KspaceStencilShells{T <: Real}
 
     """bvector weight of each shell, length-`n_shells` vector, Å² unit."""
     bweights::Vector{T}
+
+    """order of the finite-difference formula the `bweights` solve, i.e. the
+    completeness condition holds for every even moment up to `2 * order`.
+    `order = 1` is wannier90's default (MV1997 Eq. (B1))."""
+    order::Int
 end
 
 n_kpoints(shells::KspaceStencilShells) = length(shells.kpoints)
@@ -97,10 +102,12 @@ Convenience constructor of `KspaceStencilShells`, auto set `n_degens`.
 # Arguments
 See the fields of [`KspaceStencilShells`](@ref) struct.
 """
-function KspaceStencilShells(recip_lattice, kgrid_size, kpoints, bvectors, bweights)
+function KspaceStencilShells(
+        recip_lattice, kgrid_size, kpoints, bvectors, bweights, order::Integer = 1
+    )
     n_degens = [length(bvecs) for bvecs in bvectors]
     return KspaceStencilShells(
-        recip_lattice, Vec3(kgrid_size), kpoints, n_degens, bvectors, bweights
+        recip_lattice, Vec3(kgrid_size), kpoints, n_degens, bvectors, bweights, order
     )
 end
 
@@ -109,15 +116,11 @@ function KspaceStencilShells(
         atol = default_w90_kmesh_tol(),
         order::Int = 1,
     )
-    # higher-order FD needs more shells to satisfy the higher moment conditions
-    shells = search_shells(
-        recip_lattice, kgrid_size, kpoints;
-        atol, max_shells = default_w90_bvectors_search_shells() * order,
-    )
+    shells = search_shells(recip_lattice, kgrid_size, kpoints; atol, order)
     keep_shells = check_parallel(shells)
     shells = delete_shells(shells, keep_shells)
 
-    keep_shells, bweights = compute_bweights(shells; atol, order)
+    keep_shells, bweights = compute_bweights(shells; atol)
     shells = delete_shells(shells, keep_shells)
     shells.bweights .= bweights
 
@@ -126,7 +129,7 @@ function KspaceStencilShells(
         shells = delete_shells_Γ(shells)
     end
 
-    check_completeness(shells; atol, order)
+    check_completeness(shells; atol)
     return shells
 end
 
@@ -172,7 +175,8 @@ function search_shells(
         kgrid_size::AbstractVector,
         kpoints::AbstractVector;
         atol = default_w90_kmesh_tol(),
-        max_shells = default_w90_bvectors_search_shells(),
+        order::Int = 1,
+        max_shells = default_w90_bvectors_search_shells() * order,
     )
     # Usually these "magic" numbers work well for normal recip_lattice.
     # Number of nearest-neighbors to be returned
@@ -226,7 +230,9 @@ function search_shells(
     @debug "Found bvector shells" bvectors
 
     bweights = zeros(T, length(shells))
-    return KspaceStencilShells(recip_lattice, kgrid_size, kpoints, bvectors, bweights)
+    return KspaceStencilShells(
+        recip_lattice, kgrid_size, kpoints, bvectors, bweights, order
+    )
 end
 
 """
@@ -339,7 +345,8 @@ function delete_shells(shells::KspaceStencilShells, keep_shells)
     bvectors = delete_shells(shells.bvectors, keep_shells)
     bweights = shells.bweights[keep_shells]
     return KspaceStencilShells(
-        shells.recip_lattice, shells.kgrid_size, shells.kpoints, bvectors, bweights
+        shells.recip_lattice, shells.kgrid_size, shells.kpoints, bvectors, bweights,
+        shells.order,
     )
 end
 
@@ -360,7 +367,8 @@ function delete_shells_Γ(shells::KspaceStencilShells)
     end
     bweights = [2w for w in shells.bweights]
     return KspaceStencilShells(
-        shells.recip_lattice, shells.kgrid_size, shells.kpoints, bvectors, bweights
+        shells.recip_lattice, shells.kgrid_size, shells.kpoints, bvectors, bweights,
+        shells.order,
     )
 end
 
@@ -453,6 +461,9 @@ end
 
 Try to guess bvector bweights from MV1997 Eq. (B1).
 
+The order of the finite-difference formula is taken from `shells.order`, so the
+weights cannot be solved for an order the shells were not searched for.
+
 # Arguments
 - `shells`: `KspaceStencilShells` containing bvectors in each shell
 
@@ -464,16 +475,17 @@ Try to guess bvector bweights from MV1997 Eq. (B1).
     To reproduce wannier90's behavior,
     - `atol` should be set to wannier90's input parameter `kmesh_tol`
 """
-function compute_bweights(
-        shells::KspaceStencilShells; atol = default_w90_kmesh_tol(), order::Int = 1
-    )
-    return compute_bweights(shells.bvectors; atol, order)
+function compute_bweights(shells::KspaceStencilShells; atol = default_w90_kmesh_tol())
+    return compute_bweights(shells.bvectors; atol, shells.order)
 end
 
 """
     $(SIGNATURES)
 
 Check completeness (B1 condition) of `KspaceStencilShells`.
+
+Checks every even moment up to `2 * shells.order`, so the condition verified is
+always the one the `bweights` were solved for.
 
 # Arguments
 - `shells`: `KspaceStencilShells` containing bvectors in each shell
@@ -487,8 +499,9 @@ Check completeness (B1 condition) of `KspaceStencilShells`.
     - `atol` should be set to wannier90's input parameter `kmesh_tol`
 """
 function check_completeness(
-        shells::KspaceStencilShells{T}; atol = default_w90_kmesh_tol(), order::Int = 1
+        shells::KspaceStencilShells{T}; atol = default_w90_kmesh_tol()
     ) where {T}
+    order = shells.order
     # 2nd moment: ∑_b w_b b ⊗ b must equal the identity
     M = zeros(T, 3, 3)
     for (bvecs, w) in zip(shells.bvectors, shells.bweights)
