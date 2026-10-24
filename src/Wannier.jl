@@ -26,11 +26,13 @@ include("kpoints/kstencil.jl")
 
 include("model.jl")
 include("spread.jl")
+include("guiding_centers.jl")
 
 include("io/w90/win.jl")
 include("io/w90/nnkp.jl")
 include("io/w90/amn.jl")
 include("io/w90/mmn.jl")
+include("io/w90/bvec.jl")
 include("io/w90/chk.jl")
 include("io/w90/model.jl")
 include("io/w90/band.jl")

@@ -251,7 +251,17 @@ function omega_center(Ω::Spread; r₀::Vector{Vec3{T}}, λ::T) where {T<:Real}
     return SpreadCenter(Ω.Ω, Ω.ΩI, Ω.ΩOD, Ω.ΩD, Ω.Ω̃, Ω.ω, Ω.r, Ωc, Ωt, ωc, ωt)
 end
 
-function omega!(cache::Cache, bvectors::KspaceStencil{FT}, M) where {FT<:Real}
+# When `rguide === nothing` the branch shift is also `nothing`, so `imaglog_guided`
+# falls back to plain `imaglog` — type-specialized at compile time, zero overhead.
+@inline _branch_shift(::Nothing, _, _) = nothing
+@inline _branch_shift(rguide::AbstractVector, b, i) = b ⋅ rguide[i]
+
+function omega!(
+    cache::Cache,
+    bvectors::KspaceStencil{FT},
+    M,
+    rguide::Union{Nothing,AbstractVector{<:Vec3}}=nothing,
+) where {FT<:Real}
     r = cache.r
     fill!(r, zero(eltype(r)))
 
@@ -305,7 +315,7 @@ function omega!(cache::Cache, bvectors::KspaceStencil{FT}, M) where {FT<:Real}
                     ts += a2
 
                     if i == j
-                        imlogN = imaglog(nt)
+                        imlogN = imaglog_guided(nt, _branch_shift(rguide, b, i))
 
                         r[i] -= imlogN * wb_b
                         r²[i] += wᵇ * (1 - a2 + imlogN^2)
@@ -360,15 +370,39 @@ function omega!(cache::Cache, bvectors::KspaceStencil{FT}, M) where {FT<:Real}
 end
 
 """
-    omega(model, [U])
+    omega(model::Model; guiding_centers=false)
+    omega(model::Model, gauges)
     omega(bvectors, M, U)
+    omega(bvectors, M, U, rguide)
 
-Compute WF spread for a [`Model`](@ref), potentially for a given gauge `U`, or by explicitely giving
-`bvectors` and `M`.
-In case of the first `bvectors = model.bvectors` and `M = model.M`.
+Compute WF spread for a [`Model`](@ref), optionally for a given gauge `U` (or
+`X`/`Y` Stiefel coordinates), or by explicitly giving `bvectors` and `M`.
+
+# Keyword arguments
+- `guiding_centers`: `false` (default) uses the principal branch of `Im[ln M_nn^{k,b}]`.
+  `true` auto-computes guiding centers via [`compute_guiding_centers`](@ref) and uses
+  them to pick the branch of the logarithm closest to `-b·rguide[n]`. A
+  `Vector{Vec3{T}}` of length `n_wann` can also be supplied directly to bypass the
+  automatic computation. Wannier90's `guiding_centres` option — useful on coarse
+  k-grids where the principal branch wraps and gives WF centers displaced by a
+  lattice vector.
 """
-omega(model::Model) = omega(model, model.gauges)
-omega(model::Model, gauges) = omega(model.kstencil, model.overlaps, gauges)
+function omega(
+    model::Model, gauges; guiding_centers::Union{Bool,AbstractVector{<:Vec3}}=false
+)
+    if guiding_centers === false
+        return omega(model.kstencil, model.overlaps, gauges)
+    end
+    rguide = if guiding_centers === true
+        compute_guiding_centers(model.kstencil, model.overlaps, gauges)
+    else
+        guiding_centers
+    end
+    return omega(model.kstencil, model.overlaps, gauges, rguide)
+end
+function omega(model::Model; guiding_centers::Union{Bool,AbstractVector{<:Vec3}}=false)
+    return omega(model, model.gauges; guiding_centers)
+end
 function omega(bvectors::KspaceStencil, M, X, Y)
     U = X_Y_to_U(X, Y)
     return omega(bvectors, M, U)
@@ -378,6 +412,12 @@ function omega(bvectors::KspaceStencil, M, U)
     cache = Cache(bvectors, M, U)
     compute_MU_UtMU!(cache, bvectors, M, U)
     return omega!(cache, bvectors, M)
+end
+
+function omega(bvectors::KspaceStencil, M, U, rguide::AbstractVector{<:Vec3})
+    cache = Cache(bvectors, M, U)
+    compute_MU_UtMU!(cache, bvectors, M, U)
+    return omega!(cache, bvectors, M, rguide)
 end
 
 function Base.show(io::IO, ::MIME"text/plain", Ω::Spread)

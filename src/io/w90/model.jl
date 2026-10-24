@@ -1,4 +1,4 @@
-export read_w90, read_w90_with_chk, write_w90
+export read_w90, read_w90_with_chk, write_w90, write_w90_centres
 
 """
     $(SIGNATURES)
@@ -10,10 +10,17 @@ Read `win` and `mmn` files, and read `amn`/`eig` files if they exist.
     Should be `true` for most cases, since usually the input `amn` matrices are
     not guaranteed to be unitary or semi-unitary.
 - use_mmn_bvecs: use the b-vectors in `mmn` file instead of regenerating them.
+- use_bvec_file: read b-vectors and their finite-difference weights directly
+    from `\$prefix.bvec` (written by wannier90 with `write_bvec = .true.`).
+    Required when wannier90 was run with higher-order finite differences
+    (`higher_order_n > 1` or `higher_order_nearest_shells`), where the parallel
+    b-vectors at multiple norms break [`compute_bweights`](@ref). Reuses
+    `kpb_k`/`kpb_G` from the `mmn` file, so it is incompatible with
+    `use_mmn_bvecs=false`.
 - kstencil_algo: algorithm to generate `KspaceStencil` if `use_mmn_bvecs` is `false`.
     Default is `generate_kspace_stencil`.
 """
-function read_w90(prefix::AbstractString; ortho_amn::Bool=true, use_mmn_bvecs::Bool=true, kstencil_algo::KspaceStencilAlgorithm=default_kstencil_algo())
+function read_w90(prefix::AbstractString; ortho_amn::Bool=true, use_mmn_bvecs::Bool=true, use_bvec_file::Bool=false, kstencil_algo::KspaceStencilAlgorithm=default_kstencil_algo())
     win = read_win(prefix * ".win")
     nbands = win.num_bands
     nwann = win.num_wann
@@ -28,7 +35,21 @@ function read_w90(prefix::AbstractString; ortho_amn::Bool=true, use_mmn_bvecs::B
     @assert nkpts == length(overlaps) "different n_kpoints in mmn and win files"
     @assert (nbands, nbands) == size(overlaps[1][1]) "different n_bands in mmn and win files"
 
-    if use_mmn_bvecs
+    if use_bvec_file
+        use_mmn_bvecs || error(
+            "use_bvec_file=true is incompatible with use_mmn_bvecs=false: " *
+            "the bvec path reuses kpb_k/kpb_G from the mmn file"
+        )
+        isfile(prefix * ".bvec") || error(
+            "$(prefix).bvec not found; rerun wannier90 with write_bvec = .true. " *
+            "or set use_bvec_file=false"
+        )
+        atol = get(win, :kmesh_tol, default_w90_kmesh_tol())
+        kstencil = read_bvec_kstencil(
+            prefix, recip_lattice, win.mp_grid, win.kpoints, kpb_k, kpb_G; atol
+        )
+        @assert n_bvectors(kstencil) == nbvecs "different n_bvectors in bvec and mmn files"
+    elseif use_mmn_bvecs
         kstencil = KspaceStencil(recip_lattice, win.kpoints, kpb_k, kpb_G)
     else
         atol = get(win, :kmesh_tol, default_w90_kmesh_tol())
@@ -39,7 +60,7 @@ function read_w90(prefix::AbstractString; ortho_amn::Bool=true, use_mmn_bvecs::B
         @assert kstencil.kpb_k == kpb_k "auto generated kpb_k are different from mmn file"
         @assert kstencil.kpb_G == kpb_G "auto generated kpb_G are different from mmn file"
         # overlaps = zeros_overlap(ComplexF64, nkpts, nbvecs, nbands)
-        # @warn "$prefix.mmn file does not exist, set M to zeros"    
+        # @warn "$prefix.mmn file does not exist, set M to zeros"
     end
 
     if isfile(prefix * ".amn")
@@ -123,4 +144,26 @@ function write_w90(prefix::AbstractString, model::Model; binary::Bool=false)
     write_mmn(outname("mmn"), model.overlaps, model.kstencil; binary)
     write_amn(outname("amn"), model.gauges; binary)
     return nothing
+end
+
+"""
+    write_w90_centres(filename, model::Model, Ω::Spread; translate_home_cell=false)
+
+Write Wannier90's `seedname_centres.xyz` file from a [`Model`](@ref) and a
+[`Spread`](@ref) (typically the return value of [`omega`](@ref)).
+
+Atom positions are pulled from `model` (converted from fractional to Cartesian
+Å) and WF centers from `Ω.r`.
+"""
+function write_w90_centres(
+    filename::AbstractString, model::Model, Ω::Spread; translate_home_cell::Bool=false
+)
+    atom_cart = [model.lattice * p for p in model.atom_positions]
+    return WannierIO.write_w90_centres(
+        filename, Ω.r;
+        atom_positions=atom_cart,
+        atom_labels=model.atom_labels,
+        lattice=model.lattice,
+        translate_home_cell,
+    )
 end

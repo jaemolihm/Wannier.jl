@@ -17,6 +17,22 @@ imaglog(z::Complex) = atan(imag(z), real(z))
 """
     $(SIGNATURES)
 
+Branch-aware imaginary part of `ln(z)`.
+
+- `imaglog_guided(z, nothing)` returns the principal branch `imaglog(z) ∈ (-π, π]`.
+- `imaglog_guided(z, s::Real)` returns `Im[ln z]` shifted by integer multiples of
+  `2π` so that the result lies in `(-s - π, -s + π]` — i.e. the branch closest
+  to `-s`.
+
+Used by the `guiding_centers` option in `omega` to pick the correct branch of
+`Im[ln M_nn^{k,b}]` on coarse k-grids, where `s = b · rguide[n]`.
+"""
+@inline imaglog_guided(z::Complex, ::Nothing) = imaglog(z)
+@inline imaglog_guided(z::Complex, s::Real) = imaglog(z * cis(s)) - s
+
+"""
+    $(SIGNATURES)
+
 Lowdin orthonormalize a matrix `U` to be (semi-)unitary.
 
 If `U` is a matrix with orthogonal columns and `V` a non-singular matrix,
